@@ -12,6 +12,7 @@ import Client
 import JSONTypes
 
 import MovingAverage
+import Prices
 
 -- while market is open 
     -- append prices into a list
@@ -31,21 +32,77 @@ data Range = Range {
     , low :: Double
     , close :: Double
 }
- 
+
+-- price state:
+-- five minute prices
+-- 1 hour prices
+-- slow moving avg (1 hour)
+-- fast moving avg (1 hour/5 minute)
+data PriceData = PriceData {
+    fiveMinPrices :: [Double]
+    , oneHourPrices :: [Double]
+    , hourSlowMovingAvg :: Double
+    , hourFastMovingAvg :: Double
+    , fiveMinFastMovingAvg :: Double 
+} deriving (Eq, Show)
+
+initialPriceData :: PriceData
+initialPriceData = PriceData [] [] 0 0 0 -- update this to contain prev data to not have to wait 34 hours at start!
+
 main :: IO ()
-main = do
-    -- three background threads:
-    globalState <- newMVar []
-    print "Hello"
-    withAsync (getPriceEveryFiveMinutes globalState) $ \writerThread ->
-        withAsync (readPrices globalState 0 0 0) $ \readerThread -> do
-            print "main thread"
-            threadDelay 100000000000000
-            return ()
-    -- fiveMinFMA <- periodMvgAvg fiveMinutes 8
-    -- print fiveMinFMA
-    -- hourFMA <- periodMvgAvg oneHour 8
-    -- hourSMA <- periodMvgAvg oneHour 34 -- need to seed with last 34 hours closing prices to start this
+main = trendFollower initialPriceData
+
+trendFollower :: PriceData -> IO ()
+trendFollower priceData = forever $ do
+    newPrice <- getPrice
+    let priceData' = priceData {fiveMinPrices = fiveMinPrices priceData ++ [newPrice]}
+    let priceData'' = priceData' {oneHourPrices = updateOneHourPrices priceData' newPrice}
+    print priceData''
+    let updatedPriceData = updateTrends priceData''
+    -- check trends and whether to notify listeners buy/sell
+    threadDelay twoSecs --fiveMinutes
+    trendFollower updatedPriceData
+
+updateTrends :: PriceData -> PriceData
+updateTrends = updateOneHourTrends . updateFiveMinTrends
+
+updateFiveMinTrends :: PriceData -> PriceData
+updateFiveMinTrends priceData = priceData {fiveMinFastMovingAvg = calculateFastMovingAverage (fiveMinPrices priceData) (fiveMinFastMovingAvg priceData)}
+
+updateOneHourTrends :: PriceData -> PriceData
+updateOneHourTrends priceData = priceData {
+    hourSlowMovingAvg = calculateSlowMovingAverage (oneHourPrices priceData) (hourSlowMovingAvg priceData)
+    , hourFastMovingAvg = calculateFastMovingAverage (oneHourPrices priceData) (hourFastMovingAvg priceData)
+}
+
+calculateSlowMovingAverage :: [Double] -> Double -> Double
+calculateSlowMovingAverage prices prevMovingAvg
+    | length prices < 34 = simpleMovingAvg prices
+    | otherwise = expMovingAvg (take 34 (reverse prices)) prevMovingAvg
+
+calculateFastMovingAverage :: [Double] -> Double -> Double
+calculateFastMovingAverage prices prevMovingAvg 
+    | length prices < 8 = simpleMovingAvg prices
+    | otherwise = expMovingAvg (take 8 (reverse prices)) prevMovingAvg
+
+-- updateOneHourPrices checks whether the new five minute price occcurs at the end of an hour
+-- if it does then update the last hour price
+-- also check whether there are more than 34 hour prices - if so then can remove last item from the list
+-- as max lookback is only 34 hours
+updateOneHourPrices :: PriceData -> Double -> [Double]
+updateOneHourPrices priceData newPrice
+    | length (fiveMinPrices priceData) `mod` 12 == 0 = removeStalePrices (oneHourPrices priceData) 34 ++ [newPrice] -- removeStalePrices then addNewPrice, e.g. addNewPrice . removeStalePrices prices
+    | otherwise = oneHourPrices priceData
+
+removeStalePrices :: [Double] -> Int -> [Double]
+removeStalePrices prices maxNPrices = take maxNPrices prices
+    -- get price every 5 minutes
+    -- on every 12th price - close = new 1 hour price
+    -- if there < 34 1 hour prices then calculate simple moving avg using 1 hour prices
+    -- if > 34 1 hour prices then calculate exponential moving avgs using 1 hour prices
+    -- if FMA > SMA then calculate mvg avgs with 5 minute prices
+    -- if price > FMA then BUY signal (Tweet/etc.)
+
 
     -- every hour - check whether the hourFMA > hourSMA
     -- if hourFMA > hourSMA
@@ -56,61 +113,8 @@ main = do
         -- every five minutes check whether the price < fiveMinSMA
             -- sell when price < fiveMinSMA
 
-    -- print mvgAvg
-    -- multipleDays
-    -- prices <- getPricesWhileMarketOpen
-    -- seq <- sequence prices
-    -- print $ "Today's low:" ++ show (minimum seq)
-
-multipleDays :: IO ()
-multipleDays = do
-    dayRange <- oneDay
-    multipleDays
-
-oneDay :: IO Range
-oneDay = do
-    range <- getTodaysRange
-    print $ "Today's high = " ++ show (high range)
-    print $ "Today's low = " ++ show (low range)
-    print $ "Today's close = " ++ show (close range) 
-    return range
-
-getTodaysRange :: IO Range
-getTodaysRange = do
-    prices <- getPricesWhileMarketOpen
-    -- seq <- sequence prices
-    return $ Range (maximum prices) (minimum prices) (last prices)
-
-getPricesWhileMarketOpen :: IO [Double]
-getPricesWhileMarketOpen = go [] 5
-    where
-        go l nPrices = do
---            isOpen <- isMarketOpen
-            price <- getPrice
-            print nPrices
-            if nPrices > 0 then go (l ++ [price]) (nPrices-1) else return (l ++ [price])
-            -- if isOpen then go (l ++ [price]) (nPrices-1) else return l
-
 fiveMinutes = 300000000 -- microseconds
 twoSecs = 2000000 -- microseconds
-
-getPrice :: IO Double
-getPrice = do
-    quote <- getQuote "BTCGBP"
-    print $ timestamp $ fromJust quote
-    print $ price $ fromJust quote
-    threadDelay twoSecs
-    case quote of
-        Just q -> return $ price q
-        Nothing -> return 0.0
-
-isMarketOpen :: IO Bool
-isMarketOpen = do
-    marketStatus <- marketIsOpen
-    case marketStatus of
-        Just m -> return $ market_is_open m
-        Nothing -> return False
-
 
 -- https://www.dailyfx.com/forex/education/trading_tips/daily_trading_lesson/2012/03/26/Short_Term_Momentum_Scalping_in_Forex.html
 

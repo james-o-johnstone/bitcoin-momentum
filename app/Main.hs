@@ -4,6 +4,7 @@ import Control.Concurrent
 import Control.Concurrent.MVar
 import Control.Concurrent.Async
 import Control.Monad
+import Control.Monad.State
 import Data.Maybe
 import Data.IORef
 import Debug.Trace
@@ -46,34 +47,35 @@ data PriceData = PriceData {
     , fiveMinFastMovingAvg :: Double 
 } deriving (Eq, Show)
 
+type PriceState = State PriceData
+
 initialPriceData :: PriceData
 initialPriceData = PriceData [] [] 0 0 0 -- update this to contain prev data to not have to wait 34 hours at start!
 
 main :: IO ()
-main = trendFollower initialPriceData
+main = runStateT trendFollower initialPriceData
 
-trendFollower :: PriceData -> IO ()
-trendFollower priceData = forever $ do
-    newPrice <- getPrice
-    let priceData' = priceData {fiveMinPrices = fiveMinPrices priceData ++ [newPrice]}
-    let priceData'' = priceData' {oneHourPrices = updateOneHourPrices priceData' newPrice}
-    print priceData''
-    let updatedPriceData = updateTrends priceData''
+trendFollower :: StateT PriceState IO ()
+trendFollower = forever $ do
+    newPrice <- liftIO getPrice
+    updatedPriceData <- updatePriceData newPrice
+    liftIO $ print updatedPriceData
     -- check trends and whether to notify listeners buy/sell
     threadDelay twoSecs --fiveMinutes
-    trendFollower updatedPriceData
 
 updateTrends :: PriceData -> PriceData
 updateTrends = updateOneHourTrends . updateFiveMinTrends
 
-updateFiveMinTrends :: PriceData -> PriceData
-updateFiveMinTrends priceData = priceData {fiveMinFastMovingAvg = calculateFastMovingAverage (fiveMinPrices priceData) (fiveMinFastMovingAvg priceData)}
+updateFiveMinTrends :: PriceState ()
+updateFiveMinTrends priceData = modify (\priceData -> priceData {
+    fiveMinFastMovingAvg = calculateFastMovingAverage (fiveMinPrices priceData) (fiveMinFastMovingAvg priceData)
+})
 
-updateOneHourTrends :: PriceData -> PriceData
-updateOneHourTrends priceData = priceData {
+updateOneHourTrends :: PriceState ()
+updateOneHourTrends = modify (\priceData -> priceData {
     hourSlowMovingAvg = calculateSlowMovingAverage (oneHourPrices priceData) (hourSlowMovingAvg priceData)
     , hourFastMovingAvg = calculateFastMovingAverage (oneHourPrices priceData) (hourFastMovingAvg priceData)
-}
+})
 
 calculateSlowMovingAverage :: [Double] -> Double -> Double
 calculateSlowMovingAverage prices prevMovingAvg
@@ -85,11 +87,23 @@ calculateFastMovingAverage prices prevMovingAvg
     | length prices < 8 = simpleMovingAvg prices
     | otherwise = expMovingAvg (take 8 (reverse prices)) prevMovingAvg
 
+updatePriceData :: Double -> PriceState ()
+updatePriceData newPrice = do
+    updateFiveMinPrices newPrice
+    updateOneHourPrices
+    updateFiveMinTrends
+    updateOneHourTrends
+
+updateFiveMinPrices :: Double -> PriceState()
+updateFiveMinPrices newPrice = modify (\priceData -> priceData {
+    fiveMinPrices = fiveMinPrices ++ [newPrice]
+})
+
 -- updateOneHourPrices checks whether the new five minute price occcurs at the end of an hour
 -- if it does then update the last hour price
 -- also check whether there are more than 34 hour prices - if so then can remove last item from the list
 -- as max lookback is only 34 hours
-updateOneHourPrices :: PriceData -> Double -> [Double]
+updateOneHourPrices :: PriceState -> [Double]
 updateOneHourPrices priceData newPrice
     | length (fiveMinPrices priceData) `mod` 12 == 0 = removeStalePrices (oneHourPrices priceData) 34 ++ [newPrice] -- removeStalePrices then addNewPrice, e.g. addNewPrice . removeStalePrices prices
     | otherwise = oneHourPrices priceData

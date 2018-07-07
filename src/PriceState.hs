@@ -1,6 +1,6 @@
 module PriceState (
     PriceData (..)
-    , updatePrices
+    , runPriceDataUpdater
 )
 where
 
@@ -9,7 +9,7 @@ import Control.Monad.State
 import MovingAverage
 
 data PriceData = PriceData {
-    latestPrice :: Double
+    ticks :: Integer
     , fiveMinPrices :: [Double]
     , oneHourPrices :: [Double]
     , hourSlowMovingAvg :: Double
@@ -19,15 +19,22 @@ data PriceData = PriceData {
 
 type PriceState = State PriceData
 
-updatePrices = runState updatePriceData
+runPriceDataUpdater :: Double -> PriceData -> PriceData
+runPriceDataUpdater newPrice = execState $ updatePriceData newPrice
 
-updatePriceData :: PriceState ()
-updatePriceData = do
-    updateFiveMinPrices
+updatePriceData :: Double -> PriceState ()
+updatePriceData newPrice = do
+    tick
+    updateFiveMinPrices newPrice
     updateOneHourPrices
     removeStalePrices 
     updateFiveMinTrends
     updateOneHourTrends
+
+tick :: PriceState ()
+tick = modify (\priceData -> priceData {
+    ticks = ticks priceData + 1
+})
 
 updateFiveMinTrends :: PriceState ()
 updateFiveMinTrends = do
@@ -44,18 +51,20 @@ updateOneHourTrends = do
     })
     return ()
 
-updateFiveMinPrices :: PriceState ()
-updateFiveMinPrices = do 
+updateFiveMinPrices :: Double -> PriceState ()
+updateFiveMinPrices newPrice = do 
     modify (\priceData -> priceData {
-        fiveMinPrices = fiveMinPrices priceData ++ [latestPrice priceData]
+        fiveMinPrices = fiveMinPrices priceData ++ [newPrice]
     })
     return ()
 
+-- also check whether there are more than 34 hour prices - if so then can remove last item from the list
+-- as max lookback is only 34 hours
 updateOneHourPrices :: PriceState ()
 updateOneHourPrices = do
     priceData <- get
-    when (length (fiveMinPrices priceData) `mod` 12 == 0) $
-        modify (\pd -> pd {oneHourPrices = oneHourPrices priceData ++ [latestPrice priceData]})
+    when (ticks priceData `mod` 12 == 0) $
+        modify (\pd -> pd {oneHourPrices = oneHourPrices priceData ++ [last $ fiveMinPrices priceData]})
     return ()
     
 removeStalePrices :: PriceState ()

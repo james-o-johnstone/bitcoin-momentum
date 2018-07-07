@@ -19,9 +19,8 @@ main = runStateT trendFollower initialPriceData
 trendFollower :: PriceStateT ()
 trendFollower = forever $ do
     newPrice <- liftIO getPrice
-    modify (\priceData -> priceData {latestPrice = newPrice})
     priceData <- get
-    let (_, updatedPriceData) = updatePrices priceData
+    let updatedPriceData = runPriceDataUpdater newPrice priceData
     liftIO $ print updatedPriceData
     put updatedPriceData
     -- check trends and whether to notify listeners buy/sell

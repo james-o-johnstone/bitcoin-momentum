@@ -1,28 +1,29 @@
-module PriceState (
-    PriceData (..)
+module PriceState 
+    ( PriceData (..)
     , runPriceDataUpdater
-)
-where
+    ) where
 
 import Control.Monad.State
 
-import MovingAverage
+import Const (fastLookback, slowLookback)
+import MovingAverage (Average, fastMovingAvg, slowMovingAvg)
+import Prices (Price, takeNLatestPrices)
 
-data PriceData = PriceData {
-    ticks :: Integer
-    , fiveMinPrices :: [Double]
-    , oneHourPrices :: [Double]
-    , hourSlowMovingAvg :: Double
-    , hourFastMovingAvg :: Double
-    , fiveMinFastMovingAvg :: Double 
-} deriving (Eq, Show)
+data PriceData = PriceData 
+    { ticks :: !Int
+    , fiveMinPrices :: ![Price]
+    , oneHourPrices :: ![Price]
+    , hourSlowMovingAvg :: !Average
+    , hourFastMovingAvg :: !Average
+    , fiveMinFastMovingAvg :: !Average 
+    } deriving (Eq, Show)
 
 type PriceState = State PriceData
 
-runPriceDataUpdater :: Double -> PriceData -> PriceData
+runPriceDataUpdater :: Price -> PriceData -> PriceData
 runPriceDataUpdater newPrice = execState $ updatePriceData newPrice
 
-updatePriceData :: Double -> PriceState ()
+updatePriceData :: Price -> PriceState ()
 updatePriceData newPrice = do
     tick
     updateFiveMinPrices newPrice
@@ -32,22 +33,22 @@ updatePriceData newPrice = do
     updateOneHourTrends
 
 tick :: PriceState ()
-tick = modify (\priceData -> priceData {
-    ticks = ticks priceData + 1
+tick = modify (\pd -> pd {
+    ticks = ticks pd + 1
 })
 
 updateFiveMinTrends :: PriceState ()
 updateFiveMinTrends = do
-    modify (\priceData -> priceData {
-        fiveMinFastMovingAvg = calculateFastMovingAverage (fiveMinPrices priceData) (fiveMinFastMovingAvg priceData)
+    modify (\pd -> pd {
+        fiveMinFastMovingAvg = fastMovingAvg (fiveMinPrices pd) (fiveMinFastMovingAvg pd)
     })
     return ()
 
 updateOneHourTrends :: PriceState ()
 updateOneHourTrends = do
-    modify (\priceData -> priceData {
-        hourSlowMovingAvg = calculateSlowMovingAverage (oneHourPrices priceData) (hourSlowMovingAvg priceData)
-        , hourFastMovingAvg = calculateFastMovingAverage (oneHourPrices priceData) (hourFastMovingAvg priceData)
+    modify (\pd -> pd {
+        hourSlowMovingAvg = slowMovingAvg (oneHourPrices pd) (hourSlowMovingAvg pd)
+        , hourFastMovingAvg = fastMovingAvg (oneHourPrices pd) (hourFastMovingAvg pd)
     })
     return ()
 
@@ -58,19 +59,20 @@ updateFiveMinPrices newPrice = do
     })
     return ()
 
--- also check whether there are more than 34 hour prices - if so then can remove last item from the list
--- as max lookback is only 34 hours
 updateOneHourPrices :: PriceState ()
 updateOneHourPrices = do
     priceData <- get
-    when (ticks priceData `mod` 12 == 0) $
-        modify (\pd -> pd {oneHourPrices = oneHourPrices priceData ++ [last $ fiveMinPrices priceData]})
+    when (oneHourPassed $ ticks priceData) $
+        modify (\pd -> pd {oneHourPrices = oneHourPrices priceData ++ [latestPrice priceData]})
     return ()
-    
+    where 
+        oneHourPassed t = t `mod` 12 == 0
+        latestPrice priceData = last $ fiveMinPrices priceData
+
 removeStalePrices :: PriceState ()
 removeStalePrices = do 
-    modify (\priceData -> priceData {
-        fiveMinPrices = take 8 (fiveMinPrices priceData)
-        , oneHourPrices = take 34 (oneHourPrices priceData)
+    modify (\pd -> pd {
+        fiveMinPrices = takeNLatestPrices fastLookback (fiveMinPrices pd)
+        , oneHourPrices = takeNLatestPrices slowLookback (oneHourPrices pd)
     })
     return ()

@@ -4,67 +4,59 @@ import Control.Concurrent
 import Control.Monad
 import Control.Monad.State
 
-import MovingAverage
-import PriceState
-import Prices
+import Const (fastLookback, fiveMinutes, slowLookback)
+import MovingAverage (fastMovingAvg, simpleMovingAvg, slowMovingAvg)
+import PriceState (PriceData (..), runPriceDataUpdater)
+import Prices (getPrice, Price, takeNLatestPrices)
 
 type PriceStateT = StateT PriceData IO
 
 initialPriceData :: PriceData
-initialPriceData = PriceData 0 [] [] 0 0 0 -- update this to contain prev data to not have to wait 34 hours at start!
+initialPriceData = PriceData
+    { ticks = 0
+    , fiveMinPrices = []
+    , oneHourPrices = []
+    , hourSlowMovingAvg = slowMovingAvg initHourPrices (simpleMovingAvg (takeNLatestPrices slowLookback initHourPrices))
+    , hourFastMovingAvg = fastMovingAvg initHourPrices (simpleMovingAvg (takeNLatestPrices fastLookback initHourPrices))
+    , fiveMinFastMovingAvg = 0
+    }
+    where
+        initHourPrices :: [Price]
+        initHourPrices = []
 
-main :: IO ((), PriceData)
-main = runStateT trendFollower initialPriceData
+main :: IO ()
+main = trendFollower initialPriceData
 
-trendFollower :: PriceStateT ()
-trendFollower = forever $ do
-    newPrice <- liftIO getPrice
-    priceData <- get
+trendFollower :: PriceData -> IO ()
+trendFollower priceData = do
+    newPrice <- getPrice
     let updatedPriceData = runPriceDataUpdater newPrice priceData
-    liftIO $ print updatedPriceData
-    put updatedPriceData
-    -- check trends and whether to notify listeners buy/sell
-    liftIO $ threadDelay twoSecs --fiveMinutes
+    print updatedPriceData
+    print $ checkTrends updatedPriceData
+    -- TODO notify listeners buy/sell
+    threadDelay fiveMinutes
+    trendFollower updatedPriceData
 
-fiveMinutes :: Int
-fiveMinutes = 300000000 -- microseconds
+checkTrends :: PriceData -> String
+checkTrends priceData
+    | strongBuy priceData = "Buy"
+    | weakBuy priceData = "Weak Buy"
+    | strongSell priceData = "Sell"
+    | weakSell priceData = "Weak Sell"
+    | otherwise = "Not sure"
+    where
+        strongBuy :: PriceData -> Bool
+        strongBuy priceData = hourFastMovingAvg priceData > hourSlowMovingAvg priceData
+            && last (fiveMinPrices priceData) > hourFastMovingAvg priceData
+            && last (fiveMinPrices priceData) > fiveMinFastMovingAvg priceData
+        
+        weakBuy :: PriceData -> Bool
+        weakBuy priceData = hourFastMovingAvg priceData > hourSlowMovingAvg priceData
 
-twoSecs :: Int
-twoSecs = 2000000 -- microseconds
-
--- https://www.dailyfx.com/forex/education/trading_tips/daily_trading_lesson/2012/03/26/Short_Term_Momentum_Scalping_in_Forex.html
-
--- calculate 8 period exponential moving average (fast moving average)
-
--- calculate 34 period exponential moving average (slow moving average)
-
--- if FMA > SMA - wait until price > (SMA AND FMA) in a bull market ( 1 hour chart )
-
-    -- buy when price > 8 EMA on the 5 minute chart
-
--- if FMA < SMA - wait until price < (SMA AND FMA) in a bear market
-
-    -- sell when price < 8 EMA on the 5 minute chart
-
-    
--- find maximum and minimum in the list
--- print max and min
--- getMultipleQuotes :: Int -> [Maybe [Quotes]]
-
--- Trading strategy: 
--- http://www.quantifiedstrategies.com/buy-when-sp-500-makes-new-intraday-high/
--- http://jonathankinlay.com/2018/06/simple-momentum-strategy/
-
--- if todays high > previous 5 day high
-    -- if IBS < 0.15
-        -- buy
-    -- if today's close > yesterday's high 
-        -- sell
-    -- both entry and exiton the close
-
--- Internal Bar Strength (IBS) = (Close - Low) / (High - Low)
-
--- make request to API every ~5 minutes
--- track current high, current low
--- also need to store highest over the last 5 days (do this at the end of the day)
--- also need to store the closing price of the previous day
+        strongSell :: PriceData -> Bool
+        strongSell priceData = hourFastMovingAvg priceData < hourSlowMovingAvg priceData 
+            && last (fiveMinPrices priceData) < hourFastMovingAvg priceData
+            && last (fiveMinPrices priceData) < fiveMinFastMovingAvg priceData
+        
+        weakSell :: PriceData -> Bool
+        weakSell priceData = hourFastMovingAvg priceData < hourSlowMovingAvg priceData
